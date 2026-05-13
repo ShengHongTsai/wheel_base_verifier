@@ -1,8 +1,10 @@
+import argparse
+import math
+
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
-import math
 
 def euler_from_quaternion(quaternion):
     """
@@ -15,22 +17,20 @@ def euler_from_quaternion(quaternion):
     yaw = math.atan2(siny_cosp, cosy_cosp)
     return yaw
 
-VALID_MODES = ('rotation', 'linear', 'both')
+VALID_MODES = ('rotation', 'linear', 'all')
 
 class WheelbaseVerifier(Node):
-    def __init__(self):
+    def __init__(self, test_mode='all'):
         super().__init__('wheelbase_verifier')
 
-        # --- User-selectable test mode ---
-        # Set via: --ros-args -p test_mode:=rotation | linear | both
-        self.declare_parameter('test_mode', 'both')
-        self.test_mode = self.get_parameter('test_mode').get_parameter_value().string_value
-        if self.test_mode not in VALID_MODES:
+        # --- User-selectable test mode (set via -test_mode CLI arg) ---
+        if test_mode not in VALID_MODES:
             self.get_logger().error(
-                f"Invalid test_mode '{self.test_mode}'. "
-                f"Valid options: {VALID_MODES}. Defaulting to 'both'."
+                f"Invalid test_mode '{test_mode}'. "
+                f"Valid options: {VALID_MODES}. Defaulting to 'all'."
             )
-            self.test_mode = 'both'
+            test_mode = 'all'
+        self.test_mode = test_mode
 
         # Publisher for velocity commands
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -64,7 +64,7 @@ class WheelbaseVerifier(Node):
         self.current_yaw = None
 
         # State machine:
-        #   both:     WAITING_FOR_ODOM → ROTATING → ROTATION_DONE → LINEAR → DONE
+        #   all:      WAITING_FOR_ODOM → ROTATING → ROTATION_DONE → LINEAR → DONE
         #   rotation: WAITING_FOR_ODOM → ROTATING → DONE
         #   linear:   WAITING_FOR_ODOM → LINEAR → DONE
         self.state = 'WAITING_FOR_ODOM'
@@ -86,7 +86,7 @@ class WheelbaseVerifier(Node):
         self.current_y = msg.pose.pose.position.y
 
         if self.state == 'WAITING_FOR_ODOM':
-            if self.test_mode in ('rotation', 'both'):
+            if self.test_mode in ('rotation', 'all'):
                 self.previous_yaw = self.current_yaw
                 self.state = 'ROTATING'
                 self.get_logger().info("Odom received. Starting 360-degree rotation test!")
@@ -158,7 +158,7 @@ class WheelbaseVerifier(Node):
                     f"Odometry registered {math.degrees(self.accumulated_yaw):.2f} degrees "
                     f"(expected 360.0). Check physical robot alignment."
                 )
-                if self.test_mode == 'both':
+                if self.test_mode == 'all':
                     self.state = 'ROTATION_DONE'
                 else:
                     self.state = 'DONE'
@@ -193,14 +193,23 @@ class WheelbaseVerifier(Node):
             self.cmd_pub.publish(msg)  # ensure robot stays stopped
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    verifier = WheelbaseVerifier()
+def main():
+    parser = argparse.ArgumentParser(description='Wheelbase Verifier')
+    parser.add_argument(
+        '-test_mode',
+        choices=VALID_MODES,
+        default='all',
+        help='Test to run: linear, rotation, or all (default: all)',
+    )
+    args, ros_args = parser.parse_known_args()
+
+    rclpy.init(args=ros_args if ros_args else None)
+    verifier = WheelbaseVerifier(test_mode=args.test_mode)
 
     try:
         rclpy.spin(verifier)
     except KeyboardInterrupt:
-        verifier.get_logger().info("Manual interrupt received. Stopping robot...")
+        verifier.get_logger().info('Manual interrupt received. Stopping robot...')
         stop_msg = Twist()
         verifier.cmd_pub.publish(stop_msg)
     finally:
